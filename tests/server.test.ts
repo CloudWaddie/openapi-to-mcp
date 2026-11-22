@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createMcpApp } from '../src/server';
@@ -95,6 +96,70 @@ describe('server', () => {
       const accepted = await initialize(url, 'bearer mcp-test-token');
       expect(accepted.status).toBe(200);
       expect(await accepted.text()).toContain('"protocolVersion":"2025-11-25"');
+    });
+
+    it('runs the hosted OAuth flow with password approval and PKCE', async () => {
+      const server = createServer();
+      const origin = await listen(server);
+      server.on('request', createMcpApp({
+        ...baseConfig,
+        mcpAuth: { mode: 'hosted-oauth', password: 'owner-test-password', publicUrl: origin },
+      }, [mockTool]));
+      const resource = origin + '/mcp';
+      const post = (path: string, params: Record<string, string>) => fetch(origin + path, {
+        method: 'POST', body: new URLSearchParams(params), redirect: 'manual',
+      });
+
+      const unauthenticated = await initialize(resource);
+      expect(unauthenticated.status).toBe(401);
+      expect(unauthenticated.headers.get('www-authenticate')).toContain('/.well-known/oauth-protected-resource/mcp');
+      const metadata = await (await fetch(origin + '/.well-known/oauth-authorization-server')).json() as {
+        code_challenge_methods_supported: string[]; registration_endpoint: string; authorization_endpoint: string;
+      };
+      expect(metadata.code_challenge_methods_supported).toEqual(['S256']);
+
+      const redirect = 'http://localhost:5099/callback';
+      const registration = await fetch(metadata.registration_endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: [redirect], token_endpoint_auth_method: 'none' }),
+      });
+      expect(registration.status).toBe(201);
+      const client = await registration.json() as { client_id: string };
+
+      const verifier = 'a'.repeat(43);
+      const authorizationUrl = new URL(metadata.authorization_endpoint);
+      authorizationUrl.search = new URLSearchParams({
+        client_id: client.client_id, redirect_uri: redirect, response_type: 'code',
+        code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+        code_challenge_method: 'S256', resource, state: 'client-state',
+      }).toString();
+
+      const page = await fetch(authorizationUrl);
+      expect(page.status).toBe(200);
+      const approval = (await page.text()).match(/name="approval" value="([^"]+)"/)?.[1];
+      expect(approval).toBeDefined();
+      const denied = await post('/approve', { approval: approval!, password: 'wrong-password' });
+      expect(denied.status).toBe(403);
+      const approved = await post('/approve', { approval: approval!, password: 'owner-test-password' });
+      expect(approved.status).toBe(303);
+      const callback = new URL(approved.headers.get('location')!);
+      expect(callback.searchParams.get('state')).toBe('client-state');
+      const exchange = {
+        grant_type: 'authorization_code', client_id: client.client_id,
+        redirect_uri: redirect, code: callback.searchParams.get('code')!, resource,
+      };
+      expect((await post('/token', { ...exchange, code_verifier: 'b'.repeat(43) })).status).toBe(400);
+      const tokenResponse = await post('/token', { ...exchange, code_verifier: verifier });
+      expect(tokenResponse.status).toBe(200);
+      const tokens = await tokenResponse.json() as { access_token: string; refresh_token: string };
+      expect((await initialize(resource, `Bearer ${tokens.access_token}`)).status).toBe(200);
+      expect((await post('/token', { ...exchange, code_verifier: verifier })).status).toBe(400);
+
+      const refresh = { grant_type: 'refresh_token', client_id: client.client_id, refresh_token: tokens.refresh_token, resource };
+      const refreshed = await post('/token', refresh);
+      expect(refreshed.status).toBe(200);
+      expect((await refreshed.json() as { refresh_token: string }).refresh_token).not.toBe(tokens.refresh_token);
+      expect((await post('/token', refresh)).status).toBe(400);
     });
 
     it('advertises OAuth discovery and checks introspected audience, expiry and scope', async () => {

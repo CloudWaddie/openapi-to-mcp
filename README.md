@@ -69,7 +69,8 @@ Environment variables are loaded from `.env` file in the project root (using `do
 Authentication for clients connecting to `/mcp` is opt-in. Choose one of these modes.
 
 - **Static Bearer token.** Set `MCP_SERVER_BEARER_TOKEN` to a high-entropy secret and configure clients to send `Authorization: Bearer <token>` on every MCP request.
-- **OAuth 2.0.** Use an external authorization server that publishes OAuth or OpenID Connect discovery metadata and supports RFC 7662 token introspection with HTTP Basic client authentication.
+- **Hosted OAuth.** Set `MCP_PUBLIC_URL=https://mcp.example.com` to your public origin and `MCP_OAUTH_PASSWORD` to a strong private password. Configure your MCP client with `https://mcp.example.com/mcp`. The client opens the server’s authorization page in your browser, where you enter the password to approve access. Hosted OAuth supports dynamic public client registration, PKCE S256, and rotating refresh tokens. Client registrations and tokens are stored in memory, so clients must reconnect after a restart or redeploy.
+- **External OAuth.** Use an external authorization server that publishes OAuth or OpenID Connect discovery metadata and supports RFC 7662 token introspection with HTTP Basic client authentication.
 
 | OAuth variable | Purpose |
 |----------|-------------|

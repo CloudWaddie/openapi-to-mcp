@@ -199,4 +199,17 @@ describe('config', () => {
     process.env.MCP_SERVER_BEARER_TOKEN = 'server-token';
     expect(() => loadConfig()).toThrow('Configure either MCP server Bearer authentication or OAuth');
   });
+
+  it('enables hosted OAuth with a password and public origin', () => {
+    process.env.MCP_OAUTH_PASSWORD = 'owner-test-password';
+    expect(() => loadConfig()).toThrow('MCP_PUBLIC_URL is required');
+    process.env.MCP_PUBLIC_URL = 'https://mcp.example.com/mcp';
+    expect(() => loadConfig()).toThrow('MCP_PUBLIC_URL must be the public origin');
+    process.env.MCP_PUBLIC_URL = 'https://mcp.example.com';
+    expect(loadConfig().mcpAuth).toEqual({
+      mode: 'hosted-oauth',
+      password: 'owner-test-password',
+      publicUrl: 'https://mcp.example.com',
+    });
+  });
 });

@@ -1,12 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import axios from 'axios';
 import type { Express, RequestHandler } from 'express';
+import { configureHostedOAuth } from './hosted-oauth';
 
 const bearerTokenPattern = /^[A-Za-z0-9._~+\/-]+=*$/;
 const scopePattern = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
 
 export type McpAuthConfig =
   | { mode: 'bearer'; token: string }
+  | { mode: 'hosted-oauth'; password: string; publicUrl: string }
   | {
       mode: 'oauth';
       resource: string;
@@ -45,7 +47,19 @@ export function loadMcpAuthConfig(): McpAuthConfig | undefined {
     'MCP_OAUTH_RESOURCE_URL', 'MCP_OAUTH_ISSUER', 'MCP_OAUTH_INTROSPECTION_URL',
     'MCP_OAUTH_CLIENT_ID', 'MCP_OAUTH_CLIENT_SECRET', 'MCP_OAUTH_REQUIRED_SCOPES',
   ];
-  if (!oauthVariables.some((name) => process.env[name]?.trim())) {
+  const externalOAuth = oauthVariables.some((name) => process.env[name]?.trim());
+  const password = process.env.MCP_OAUTH_PASSWORD;
+  if (password !== undefined && password !== '') {
+    if (!password.trim()) throw new Error('MCP_OAUTH_PASSWORD must contain a non-whitespace character');
+    if (token || externalOAuth) throw new Error('Configure only one MCP server authentication mode');
+    const url = new URL(readOAuthUrl('MCP_PUBLIC_URL'));
+    if (url.pathname !== '/') throw new Error('MCP_PUBLIC_URL must be the public origin without /mcp');
+    return { mode: 'hosted-oauth', password, publicUrl: url.origin };
+  }
+  if (process.env.MCP_PUBLIC_URL?.trim() && !externalOAuth && !token) {
+    throw new Error('MCP_OAUTH_PASSWORD is required for hosted MCP OAuth');
+  }
+  if (!externalOAuth) {
     if (token && !bearerTokenPattern.test(token)) {
       throw new Error('MCP_SERVER_BEARER_TOKEN must be a valid Bearer token');
     }
@@ -90,6 +104,7 @@ function formEncode(value: string): string {
 }
 
 export function configureMcpAuth(app: Express, config: McpAuthConfig): RequestHandler {
+  if (config.mode === 'hosted-oauth') return configureHostedOAuth(app, config, readBearerToken);
   if (config.mode === 'bearer') {
     const expected = tokenDigest(config.token);
     return (req, res, next) => {
