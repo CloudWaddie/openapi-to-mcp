@@ -51,6 +51,7 @@ cleanupInterval.unref();
  */
 export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instructions?: string): Express {
   const app = express();
+  if (config.trustProxyHops) app.set('trust proxy', config.trustProxyHops);
   
   // Enable CORS for browser-based MCP clients (e.g., MCP Inspector)
   app.use(

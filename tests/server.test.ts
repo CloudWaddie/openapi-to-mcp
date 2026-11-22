@@ -103,11 +103,13 @@ describe('server', () => {
       const origin = await listen(server);
       server.on('request', createMcpApp({
         ...baseConfig,
+        trustProxyHops: 1,
         mcpAuth: { mode: 'hosted-oauth', password: 'owner-test-password', publicUrl: origin },
       }, [mockTool]));
       const resource = origin + '/mcp';
-      const post = (path: string, params: Record<string, string>) => fetch(origin + path, {
+      const post = (path: string, params: Record<string, string>, requestOrigin = origin) => fetch(origin + path, {
         method: 'POST', body: new URLSearchParams(params), redirect: 'manual',
+        headers: { Origin: requestOrigin, 'X-Forwarded-For': '192.0.2.10' },
       });
 
       const unauthenticated = await initialize(resource);
@@ -136,10 +138,13 @@ describe('server', () => {
 
       const page = await fetch(authorizationUrl);
       expect(page.status).toBe(200);
+      expect(page.headers.get('referrer-policy')).toBe('origin');
       const approval = (await page.text()).match(/name="approval" value="([^"]+)"/)?.[1];
       expect(approval).toBeDefined();
       const denied = await post('/approve', { approval: approval!, password: 'wrong-password' });
       expect(denied.status).toBe(403);
+      const crossOrigin = await post('/approve', { approval: approval!, password: 'owner-test-password' }, 'https://other.example');
+      expect(crossOrigin.status).toBe(403);
       const approved = await post('/approve', { approval: approval!, password: 'owner-test-password' });
       expect(approved.status).toBe(303);
       const callback = new URL(approved.headers.get('location')!);

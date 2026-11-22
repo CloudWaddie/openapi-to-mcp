@@ -212,4 +212,11 @@ describe('config', () => {
       publicUrl: 'https://mcp.example.com',
     });
   });
+
+  it('validates the trusted proxy hop count', () => {
+    process.env.MCP_TRUST_PROXY_HOPS = '1';
+    expect(loadConfig().trustProxyHops).toBe(1);
+    process.env.MCP_TRUST_PROXY_HOPS = 'true';
+    expect(() => loadConfig()).toThrow('MCP_TRUST_PROXY_HOPS must be a non-negative integer');
+  });
 });

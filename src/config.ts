@@ -30,6 +30,8 @@ export interface McpConfig {
   port: number;
   /** Host to bind. */
   host: string;
+  /** Number of reverse proxy hops trusted for forwarded client addresses. */
+  trustProxyHops?: number;
   /** OpenAPI spec source: URL (http:// or https://) or file path. */
   openApiSpec: string | null;
   /** Include only these endpoints (method:path, e.g. get:/messages). Priority over exclude. */
@@ -62,6 +64,11 @@ export function loadConfig(): McpConfig {
   const apiBaseUrl = (process.env.MCP_API_BASE_URL ?? process.env.API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, '');
   const port = envInt('MCP_PORT', DEFAULT_MCP_PORT);
   const host = process.env.MCP_HOST ?? DEFAULT_MCP_HOST;
+  const proxyHops = process.env.MCP_TRUST_PROXY_HOPS?.trim() || '0';
+  const trustProxyHops = Number(proxyHops);
+  if (!/^\d+$/.test(proxyHops) || !Number.isSafeInteger(trustProxyHops)) {
+    throw new Error('MCP_TRUST_PROXY_HOPS must be a non-negative integer');
+  }
   // Support both old (MCP_OPENAPI_SPEC_URL/MCP_OPENAPI_SPEC_FILE) and new (MCP_OPENAPI_SPEC) formats for backward compatibility
   const openApiSpec =
     process.env.MCP_OPENAPI_SPEC?.trim() ||
@@ -82,6 +89,7 @@ export function loadConfig(): McpConfig {
     apiBaseUrl,
     port,
     host,
+    trustProxyHops,
     openApiSpec,
     includeEndpoints,
     excludeEndpoints,

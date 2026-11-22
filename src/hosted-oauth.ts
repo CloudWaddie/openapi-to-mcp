@@ -133,7 +133,8 @@ export function configureHostedOAuth(
       res.set({
         'Cache-Control': 'no-store',
         'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
-        'Referrer-Policy': 'no-referrer',
+        // Keep the browser's form POST Origin without leaking the authorization URL.
+        'Referrer-Policy': 'origin',
       }).type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8">
 <title>Authorize MCP access</title><h1>Authorize MCP access</h1><p>Client callback: ${host}</p>
 <form action="/approve" method="post">
