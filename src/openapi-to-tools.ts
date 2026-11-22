@@ -64,6 +64,15 @@ function pathToToolSegment(path: string): string {
     .replace(/^_|_$/g, '') || 'index'; // remove leading/trailing underscores
 }
 
+const MAX_TOOL_NAME_LENGTH = 128;
+
+function normalizeToolName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^[.-]+/, '')
+    .slice(0, MAX_TOOL_NAME_LENGTH)
+    .replace(/[.-]+$/, '') || 'index';
+}
+
 function isIncluded(
   key: string,
   includeEndpoints: string[],
@@ -279,11 +288,27 @@ export function openApiToTools(
   for (const { name } of ops) {
     nameCount.set(name, (nameCount.get(name) ?? 0) + 1);
   }
+  const namedOperations = ops.map((op) => ({
+    ...op,
+    preferredName: (nameCount.get(op.name) ?? 0) > 1 ? `${op.name}_${op.method}` : op.name,
+  }));
+  // Reserve already-valid names so normalization does not rename existing tools.
+  const reservedNames = new Set(namedOperations
+    .map(({ preferredName }) => preferredName)
+    .filter((name) => normalizeToolName(name) === name));
+  const usedNames = new Set<string>();
   const tools: ToolFromOpenApi[] = [];
 
-  for (const { method, path, op, name } of ops) {
-    const uniqueName = (nameCount.get(name) ?? 0) > 1 ? `${name}_${method}` : name;
-    
+  for (const { method, path, op, preferredName } of namedOperations) {
+    const normalizedName = normalizeToolName(preferredName);
+    let uniqueName = normalizedName;
+    for (let index = 2; usedNames.has(uniqueName) ||
+      (reservedNames.has(uniqueName) && uniqueName !== preferredName); index++) {
+      const suffix = `_${index}`;
+      uniqueName = normalizedName.slice(0, MAX_TOOL_NAME_LENGTH - suffix.length) + suffix;
+    }
+    usedNames.add(uniqueName);
+
     // Resolve all parameters (including $ref) to get actual parameter definitions
     const resolvedParams = (op.parameters ?? [])
       .map((p) => resolveParameter(p, spec))

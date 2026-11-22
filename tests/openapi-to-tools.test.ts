@@ -68,6 +68,53 @@ describe('openapi-to-tools', () => {
     expect(tools.some((t) => (t.name === 'channels_get' || t.name === 'channels_post') && t.description)).toBe(true);
   });
 
+  it('normalizes MCP names while dispatching requests to their original endpoints', async () => {
+    const upstream = {
+      ...spec,
+      paths: {
+        '/models/{model_name}:generatecontent': {
+          post: { parameters: [{ name: 'model_name', in: 'path' as const, required: true }] },
+        },
+        '/models/model_name_generatecontent': { post: {} },
+        '/.well-known/jwks.json': { get: {} },
+      },
+    };
+    mock.onPost('/models/gemini:generatecontent').reply(200, { status: 'ok' });
+    const tools = openApiToTools(upstream, {
+      includeEndpoints: [],
+      excludeEndpoints: [],
+      toolPrefix: '',
+      apiBaseUrl: baseUrl,
+      axiosInstance,
+    });
+
+    expect(tools.map(({ name }) => name)).toEqual([
+      'models_model_name_generatecontent_2',
+      'models_model_name_generatecontent',
+      'well-known_jwks.json',
+    ]);
+    const response = await tools[0].handler({ model_name: 'gemini' });
+    expect(response.content[0].text).toBe('{"status":"ok"}');
+  });
+
+  it('makes distinct valid names when an invalid prefix or long paths need normalization', () => {
+    const stem = 'a'.repeat(140);
+    const upstream = { ...spec, paths: { [`/${stem}1`]: { get: {} }, [`/${stem}2`]: { get: {} } } };
+    const names = openApiToTools(upstream, {
+      includeEndpoints: [],
+      excludeEndpoints: [],
+      toolPrefix: '.custom:prefix',
+      apiBaseUrl: baseUrl,
+      axiosInstance,
+    }).map(({ name }) => name);
+
+    expect(new Set(names).size).toBe(2);
+    for (const name of names) {
+      expect(name).toMatch(/^custom_prefix_[a-z0-9_]+$/);
+      expect(name.length).toBeLessThanOrEqual(128);
+    }
+  });
+
   it('applies tool prefix', () => {
     const tools = openApiToTools(spec as never, {
       includeEndpoints: [],
