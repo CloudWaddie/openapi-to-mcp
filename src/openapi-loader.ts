@@ -12,6 +12,7 @@ export interface OpenApiSpec {
   info?: { title?: string; version?: string; description?: string };
   paths?: Record<string, Record<string, OpenApiOperation>>;
   parameters?: Record<string, OpenApiParameter>;
+  components?: { schemas?: Record<string, OpenApiBodySchema> };
 }
 
 export interface OpenApiOperation {
@@ -22,15 +23,23 @@ export interface OpenApiOperation {
   requestBody?: {
     content?: {
       'application/json'?: {
-        schema?: {
-          type?: string;
-          required?: string[];
-          properties?: Record<string, { type?: string; description?: string; enum?: string[] }>;
-        };
+        schema?: OpenApiBodySchema;
       };
     };
   };
   responses?: Record<string, unknown>;
+}
+
+export interface OpenApiBodySchema {
+  $ref?: string;
+  type?: string;
+  required?: string[];
+  properties?: Record<string, OpenApiBodySchema>;
+  description?: string;
+  enum?: string[];
+  anyOf?: OpenApiBodySchema[];
+  oneOf?: OpenApiBodySchema[];
+  nullable?: boolean;
 }
 
 export interface OpenApiParameter {

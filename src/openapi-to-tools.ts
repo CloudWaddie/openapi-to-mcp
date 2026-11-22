@@ -6,7 +6,7 @@ import { z } from 'zod';
 import axios, { AxiosInstance } from 'axios';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import TurndownService from 'turndown';
-import type { OpenApiSpec, OpenApiOperation, OpenApiParameter } from './openapi-loader';
+import type { OpenApiSpec, OpenApiOperation, OpenApiParameter, OpenApiBodySchema } from './openapi-loader';
 
 // Re-export for use in this module
 type OpenApiSpecWithParams = OpenApiSpec & { parameters?: Record<string, OpenApiParameter> };
@@ -158,9 +158,47 @@ function resolveParameter(param: OpenApiParameter, spec: OpenApiSpecWithParams):
   return param;
 }
 
+function resolveBodySchema(
+  schema: OpenApiBodySchema | undefined,
+  spec: OpenApiSpec,
+): OpenApiBodySchema | undefined {
+  const seen = new Set<string>();
+  const prefix = '#/components/schemas/';
+  while (schema?.$ref) {
+    const ref = schema.$ref;
+    if (!ref.startsWith(prefix) || seen.has(ref)) return undefined;
+    seen.add(ref);
+    const key = ref.slice(prefix.length).replace(/~1/g, '/').replace(/~0/g, '~');
+    const schemas = spec.components?.schemas;
+    schema = schemas && Object.prototype.hasOwnProperty.call(schemas, key) ? schemas[key] : undefined;
+  }
+  return schema;
+}
+
+function bodyFieldToZod(schema: OpenApiBodySchema, spec: OpenApiSpec, depth = 0): z.ZodTypeAny {
+  const resolved = resolveBodySchema(schema, spec);
+  if (!resolved || depth >= 8) return z.unknown();
+  const alternatives = resolved.anyOf ?? resolved.oneOf;
+  let field: z.ZodTypeAny;
+  if (alternatives?.length) {
+    const [first, second, ...rest] = alternatives.map((item) => bodyFieldToZod(item, spec, depth + 1));
+    field = second ? z.union([first, second, ...rest]) : first;
+  } else if (resolved.type === 'object' || resolved.properties) {
+    field = z.object({}).passthrough();
+  } else if (resolved.type === 'null') {
+    field = z.null();
+  } else if (resolved.type || resolved.enum?.length) {
+    field = openApiTypeToZod({ type: resolved.type, enum: resolved.enum }, undefined, true);
+  } else {
+    field = z.unknown();
+  }
+  return resolved.nullable ? field.nullable() : field;
+}
+
 function buildZodShapeFromOperation(
   op: OpenApiOperation,
   spec: OpenApiSpecWithParams,
+  bodySchema: OpenApiBodySchema | undefined,
   convertHtmlToMarkdown?: boolean,
 ): z.ZodRawShape {
   const shape: z.ZodRawShape = {};
@@ -172,14 +210,16 @@ function buildZodShapeFromOperation(
       shape[resolved.name] = openApiTypeToZod(resolved.schema, resolved.description, isRequired, convertHtmlToMarkdown);
     }
   }
-  const bodySchema = op.requestBody?.content?.['application/json']?.schema;
   const requiredFields = bodySchema?.required ?? [];
   if (bodySchema?.properties) {
     for (const [propName, propSchema] of Object.entries(bodySchema.properties)) {
       if (shape[propName] === undefined) {
-        const propSchemaWithDesc = propSchema as { type?: string; description?: string; enum?: string[] };
-        const isRequired = requiredFields.includes(propName);
-        shape[propName] = openApiTypeToZod(propSchemaWithDesc, propSchemaWithDesc.description, isRequired, convertHtmlToMarkdown);
+        let field = bodyFieldToZod(propSchema, spec);
+        if (!requiredFields.includes(propName)) field = field.optional();
+        const description = propSchema.description ?? resolveBodySchema(propSchema, spec)?.description;
+        shape[propName] = description
+          ? field.describe(convertHtmlToMarkdown !== false && containsHtml(description) ? htmlToMarkdown(description) : description)
+          : field;
       }
     }
   }
@@ -316,10 +356,10 @@ export function openApiToTools(
     
     const queryParamNames = resolvedParams.filter((p) => p.in === 'query').map((p) => p.name);
     const pathParamNames = resolvedParams.filter((p) => p.in === 'path').map((p) => p.name);
-    const bodySchema = op.requestBody?.content?.['application/json']?.schema;
+    const bodySchema = resolveBodySchema(op.requestBody?.content?.['application/json']?.schema, spec);
     const bodyParamNames = bodySchema?.properties ? Object.keys(bodySchema.properties) : [];
 
-    const shape = buildZodShapeFromOperation(op, spec, config.convertHtmlToMarkdown);
+    const shape = buildZodShapeFromOperation(op, spec, bodySchema, config.convertHtmlToMarkdown);
     const inputSchema = z.object(shape);
 
     let description = [op.summary, op.description].filter(Boolean).join('. ') || `API ${method.toUpperCase()} ${path}`;

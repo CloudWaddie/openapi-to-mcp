@@ -115,6 +115,58 @@ describe('openapi-to-tools', () => {
     }
   });
 
+  it('resolves a referenced request body for tool validation and upstream JSON', async () => {
+    const upstream = {
+      ...spec,
+      paths: {
+        '/model/delete': {
+          post: { requestBody: { content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ModelInfoDelete' } },
+          } } },
+        },
+      },
+      components: { schemas: {
+        ModelInfoDelete: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      } },
+    };
+    mock.onPost('/model/delete', { id: 'mock-model' }).reply(200, { mocked: true });
+    const [tool] = openApiToTools(upstream, {
+      includeEndpoints: [], excludeEndpoints: [], toolPrefix: '', apiBaseUrl: baseUrl, axiosInstance,
+    });
+
+    expect(tool.inputSchema.safeParse({}).success).toBe(false);
+    const args = tool.inputSchema.parse({ id: 'mock-model' });
+    expect((await tool.handler(args)).content[0].text).toBe('{"mocked":true}');
+  });
+
+  it('accepts object and union fields in referenced bodies for other tools', async () => {
+    const upstream = {
+      ...spec,
+      paths: { '/model/new': { post: { requestBody: { content: {
+        'application/json': { schema: { $ref: '#/components/schemas/Deployment' } },
+      } } } } },
+      components: { schemas: {
+        Deployment: {
+          required: ['model_name', 'litellm_params'],
+          properties: {
+            model_name: { type: 'string' },
+            litellm_params: { $ref: '#/components/schemas/LiteLLM_Params' },
+            metadata: { anyOf: [{ type: 'object' }, { type: 'null' }] },
+          },
+        },
+        LiteLLM_Params: { type: 'object' },
+      } },
+    };
+    const args = { model_name: 'mock-model', litellm_params: { model: 'fixture' }, metadata: null };
+    mock.onPost('/model/new', args).reply(200, { mocked: true });
+    const [tool] = openApiToTools(upstream, {
+      includeEndpoints: [], excludeEndpoints: [], toolPrefix: '', apiBaseUrl: baseUrl, axiosInstance,
+    });
+
+    expect(tool.inputSchema.safeParse({ ...args, litellm_params: 'invalid' }).success).toBe(false);
+    expect((await tool.handler(tool.inputSchema.parse(args))).content[0].text).toBe('{"mocked":true}');
+  });
+
   it('applies tool prefix', () => {
     const tools = openApiToTools(spec as never, {
       includeEndpoints: [],
