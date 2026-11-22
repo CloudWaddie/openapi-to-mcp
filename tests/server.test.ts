@@ -86,9 +86,10 @@ describe('server', () => {
     }
 
     it('lists default tools and lets clients discover and call other allowed tools', async () => {
-      const handler = jest.fn(async ({ city }: Record<string, unknown>) => ({
-        content: [{ type: 'text' as const, text: `Forecast for ${city}` }],
-      }));
+      const handler = jest.fn(async ({ city }: Record<string, unknown>, context?: Parameters<ToolFromOpenApi['handler']>[1]) => {
+        await context?.onEvent?.('data: forecast pending', 1);
+        return { content: [{ type: 'text' as const, text: `Forecast for ${city}` }] };
+      });
       const hiddenTool: ToolFromOpenApi = {
         name: 'weather_forecast',
         description: 'Look up the weather for a city',
@@ -103,6 +104,7 @@ describe('server', () => {
       }, [mockTool, hiddenTool]);
       const url = (await listen(createServer(app))) + '/mcp';
 
+      const notifications: unknown[] = [];
       async function request(method: string, params?: Record<string, unknown>) {
         const response = await fetch(url, {
           method: 'POST',
@@ -115,8 +117,9 @@ describe('server', () => {
         });
         expect(response.status).toBe(200);
         const body = await response.text();
-        const data = body.split('\n').find((line) => line.startsWith('data: '));
-        return JSON.parse(data ? data.slice(6) : body);
+        const messages = body.split('\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6)));
+        notifications.push(...messages.filter((message) => message.method === 'notifications/progress'));
+        return messages.length ? messages.at(-1) : JSON.parse(body);
       }
 
       const list = await request('tools/list');
@@ -134,10 +137,14 @@ describe('server', () => {
       expect(unknown.result.isError).toBe(true);
       expect(handler).not.toHaveBeenCalled();
       const valid = await request('tools/call', {
-        name: 'call_tool', arguments: { name: hiddenTool.name, arguments: { city: 'Adelaide' } },
+        name: 'call_tool', arguments: { name: hiddenTool.name, arguments: { city: 'Adelaide' } }, _meta: { progressToken: 'forecast' },
       });
       expect(valid.result.content[0].text).toBe('Forecast for Adelaide');
-      expect(handler).toHaveBeenCalledWith({ city: 'Adelaide' });
+      expect(handler).toHaveBeenCalledWith({ city: 'Adelaide' }, expect.any(Object));
+      expect(notifications).toContainEqual(expect.objectContaining({
+        method: 'notifications/progress',
+        params: { progressToken: 'forecast', progress: 1, message: 'data: forecast pending' },
+      }));
     });
 
     it('requires the configured static token and challenges unauthenticated requests', async () => {

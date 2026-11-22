@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { OpenApiSpec } from '../src/openapi-loader';
 import MockAdapter from 'axios-mock-adapter';
 import axios from 'axios';
 import { openApiToTools } from '../src/openapi-to-tools';
@@ -165,6 +168,104 @@ describe('openapi-to-tools', () => {
 
     expect(tool.inputSchema.safeParse({ ...args, litellm_params: 'invalid' }).success).toBe(false);
     expect((await tool.handler(tool.inputSchema.parse(args))).content[0].text).toBe('{"mocked":true}');
+  });
+
+  it('preserves route casing, encodes path arguments and forwards declared headers', async () => {
+    const upstream: OpenApiSpec = { paths: {
+      '/Models/{model}:generateContent': { post: { parameters: [
+        { in: 'path', name: 'model', required: true },
+        { in: 'header', name: 'litellm-changed-by', required: true },
+        { in: 'header', name: 'Authorization' },
+      ] } },
+      '/proxy/{endpoint}': { post: { parameters: [{ in: 'path', name: 'endpoint', required: true }] } },
+    } };
+    const [tool, proxy] = openApiToTools(upstream, {
+      includeEndpoints: ['post:/models/{model}:generatecontent', 'post:/proxy/{endpoint}'],
+      excludeEndpoints: [], toolPrefix: '', apiBaseUrl: baseUrl, apiBearerToken: 'configured-token', axiosInstance,
+    });
+    mock.onPost('/Models/folder%2Fa%3F%23:generateContent').reply((request) => {
+      expect(request.headers?.['litellm-changed-by']).toBe('alice');
+      expect(request.headers?.['Authorization']).toBe('Bearer configured-token');
+      return [200, { matched: true }];
+    });
+    mock.onPost('/proxy/folder/a%3F%23').reply(200, { matched: true });
+    const args = tool.inputSchema.parse({
+      model: 'folder/a?#', headers: { 'litellm-changed-by': 'alice', Authorization: 'Bearer override' },
+    });
+    expect((await tool.handler(args)).content[0].text).toBe('{"matched":true}');
+    expect((await proxy.handler({ endpoint: 'folder/a?#' })).content[0].text).toBe('{"matched":true}');
+    expect((await proxy.handler({ endpoint: '../other' })).isError).toBe(true);
+  });
+
+  it('sends free-form JSON, URL-encoded forms, multipart files and raw text over HTTP', async () => {
+    const upstream: OpenApiSpec = { paths: {
+      '/settings': { patch: { requestBody: { required: true, content: {
+        'application/json': { schema: { anyOf: [{ type: 'object' }, { type: 'null' }] } },
+      } } } },
+      '/login': { post: { requestBody: { content: {
+        'application/x-www-form-urlencoded': { schema: { properties: { code: { type: 'string' } } } },
+      } } } },
+      '/transcribe': { post: { requestBody: { content: {
+        'multipart/form-data': { schema: { properties: {
+          files: { type: 'array', items: { type: 'string', contentMediaType: 'application/octet-stream' } },
+        } } },
+      } } } },
+      '/sdp': { post: { requestBody: { content: { 'application/sdp': { schema: { type: 'string' } } } } } },
+    } };
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({ mediaType: request.headers['content-type'], body: Buffer.concat(chunks).toString() }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const [settings, login, transcribe, sdp] = openApiToTools(upstream, {
+        includeEndpoints: [], excludeEndpoints: [], toolPrefix: '',
+        apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      });
+      const send = async (tool: typeof settings, args: Record<string, unknown>) =>
+        JSON.parse((await tool.handler(tool.inputSchema.parse(args))).content[0].text);
+
+      expect(await send(settings, { body: { nested: { enabled: true } } })).toEqual({
+        mediaType: 'application/json', body: '{"nested":{"enabled":true}}',
+      });
+      expect(await send(settings, { body: null })).toEqual({ mediaType: 'application/json', body: 'null' });
+      expect(await send(login, { code: 'a+b' })).toEqual({ mediaType: 'application/x-www-form-urlencoded', body: 'code=a%2Bb' });
+      const upload = await send(transcribe, { files: [{ filename: 'clip.wav', data: 'aGVsbG8=', contentType: 'audio/wav' }] });
+      expect(upload.mediaType).toMatch(/^multipart\/form-data; boundary=/);
+      expect(upload.body).toContain('name="files"; filename="clip.wav"');
+      expect(upload.body).toContain('Content-Type: audio/wav');
+      expect(upload.body).toContain('hello');
+      expect(await send(sdp, { body: 'v=0' })).toEqual({ mediaType: 'application/sdp', body: 'v=0' });
+    } finally {
+      server.close();
+      server.closeAllConnections();
+    }
+  });
+
+  it('reports upstream SSE events before the stream closes', async () => {
+    const upstream: OpenApiSpec = { paths: { '/stream': { get: {} } } };
+    const server = createServer((_request, response) => {
+      response.setHeader('Content-Type', 'text/event-stream');
+      response.write('data: first\n');
+      response.write('\ndata: [DONE]\n\n');
+      // The tool should finish at [DONE] even though the upstream leaves the socket open.
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const [tool] = openApiToTools(upstream, {
+        includeEndpoints: [], excludeEndpoints: [], toolPrefix: '',
+        apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      });
+      const onEvent = jest.fn(async () => {});
+      const result = await tool.handler({}, { onEvent });
+      expect(onEvent).toHaveBeenNthCalledWith(1, 'data: first', 1);
+      expect(JSON.parse(result.content[0].text)).toContain('data: first');
+    } finally {
+      server.close();
+      server.closeAllConnections();
+    }
   });
 
   it('applies tool prefix', () => {

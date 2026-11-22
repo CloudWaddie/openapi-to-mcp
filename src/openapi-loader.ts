@@ -21,11 +21,8 @@ export interface OpenApiOperation {
   description?: string;
   parameters?: OpenApiParameter[];
   requestBody?: {
-    content?: {
-      'application/json'?: {
-        schema?: OpenApiBodySchema;
-      };
-    };
+    required?: boolean;
+    content?: Record<string, { schema?: OpenApiBodySchema }>;
   };
   responses?: Record<string, unknown>;
 }
@@ -40,6 +37,9 @@ export interface OpenApiBodySchema {
   anyOf?: OpenApiBodySchema[];
   oneOf?: OpenApiBodySchema[];
   nullable?: boolean;
+  items?: OpenApiBodySchema;
+  format?: string;
+  contentMediaType?: string;
 }
 
 export interface OpenApiParameter {
@@ -53,6 +53,8 @@ export interface OpenApiParameter {
     [key: string]: unknown;
   };
   $ref?: string;
+  allowReserved?: boolean;
+  'x-allow-slash'?: boolean;
 }
 
 /**

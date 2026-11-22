@@ -70,7 +70,7 @@ export function createMcpApp(config: McpConfig, catalog: ToolFromOpenApi[], inst
   if (config.mcpAuth) {
     app.all('/mcp', configureMcpAuth(app, config.mcpAuth));
   }
-  app.use(express.json());
+  app.use(express.json({ limit: '12mb' }));
   const appId = randomUUID();
 
   logger.info('system', `Creating MCP app with ${tools.length} tool(s)`, {
@@ -79,7 +79,14 @@ export function createMcpApp(config: McpConfig, catalog: ToolFromOpenApi[], inst
     toolNames: tools.map((t) => t.name),
   });
 
-  type ToolCb = (args: unknown, extra: unknown) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>;
+  type ToolCb = (args: unknown, extra: {
+    signal: AbortSignal;
+    _meta?: { progressToken?: string | number };
+    sendNotification: (notification: {
+      method: 'notifications/progress';
+      params: { progressToken: string | number; progress: number; message: string };
+    }) => Promise<void>;
+  }) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>;
 
   function createServerAndTransport(): { server: InstanceType<typeof McpServer>; transport: InstanceType<typeof StreamableHTTPServerTransport> } {
     const serverInfo: { name: string; version: string; instructions?: string } = {
@@ -99,12 +106,18 @@ export function createMcpApp(config: McpConfig, catalog: ToolFromOpenApi[], inst
       (server as { registerTool(name: string, config: { description: string; inputSchema: unknown }, cb: ToolCb): void }).registerTool(
         tool.name,
         { description: tool.description, inputSchema: tool.inputSchema },
-        async (args, _extra) => {
+        async (args, extra) => {
+          const progressToken = extra._meta?.progressToken;
           const correlationId = correlationIdStorage.getStore() || 'unknown';
-          logger.debug(correlationId, `Tool ${tool.name} called`, { args });
+          logger.debug(correlationId, `Tool ${tool.name} called`);
           try {
             const result = await correlationIdStorage.run(correlationId, async () => {
-              return await tool.handler(args as Record<string, unknown>);
+              return await tool.handler(args as Record<string, unknown>, {
+                signal: extra.signal,
+                onEvent: progressToken === undefined ? undefined : (message, progress) => extra.sendNotification({
+                  method: 'notifications/progress', params: { progressToken, progress, message },
+                }),
+              });
             });
             logger.debug(correlationId, `Tool ${tool.name} completed`, {
               isError: result.isError,
@@ -132,7 +145,6 @@ export function createMcpApp(config: McpConfig, catalog: ToolFromOpenApi[], inst
     
     logger.debug(correlationId, `Received ${req.method} request to ${req.path}`, {
       sessionId: sessionIdHeader,
-      body: req.body,
     });
 
     // SDK handles sessions internally, but we need to maintain server/transport instances per session
@@ -182,7 +194,7 @@ export function createMcpApp(config: McpConfig, catalog: ToolFromOpenApi[], inst
 
     try {
       logger.debug(correlationId, 'Handling MCP request');
-      await transport.handleRequest(req as never, res as never, req.body);
+      await correlationIdStorage.run(correlationId, () => transport.handleRequest(req as never, res as never, req.body));
       logger.debug(correlationId, 'MCP request handled successfully');
     } catch (err) {
       logger.error(correlationId, 'MCP handleRequest error', err instanceof Error ? err : new Error(String(err)));

@@ -65,6 +65,16 @@ Environment variables are loaded from `.env` file in the project root (using `do
 
 **Backward compatibility**: `MCP_OPENAPI_SPEC_URL` and `MCP_OPENAPI_SPEC_FILE` are still supported but deprecated. `MCP_OPENAPI_SPEC` takes precedence if set.
 
+## Request and response formats
+
+Tool names and endpoint filters are case-insensitive for paths. Upstream HTTP requests preserve the casing from the OpenAPI spec. Path parameter values are URL-encoded. Slash-delimited values are supported for unconstrained passthrough parameters named `endpoint` and parameters marked with `x-allow-slash: true`.
+
+Declared application headers are exposed in a tool's `headers` object. The server controls upstream authorization and HTTP transport headers. JSON with explicit properties uses individual arguments. Free-form JSON, top-level unions and raw payloads such as SDP use a `body` argument. If an argument name is already taken, the schema shows the new argument with an underscore prefix.
+
+Multipart file arguments accept `{ "filename": "clip.wav", "data": "<base64>", "contentType": "audio/wav" }`. File arrays use the same object for each file. Each file is limited to 8 MiB and the MCP JSON request is limited to 12 MiB. URL-encoded forms are also supported.
+
+For upstream server-sent events, MCP clients that supply a progress token can receive events as progress notifications during both direct and discovered tool calls. The final tool result still contains the SSE text. The server stops reading at `[DONE]` or EOF and bounds SSE responses to 8 MiB with a 30-second idle timeout.
+
 ## Show a smaller default tool list
 
 Enable tool discovery to list only your chosen API tools plus `search_tools` and `call_tool` over `/mcp`.

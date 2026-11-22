@@ -81,7 +81,7 @@ export function createDiscoveredTools(
       name: callName,
       description: `Run an API tool discovered through ${searchName}. Use the exact name and supply arguments that match its input schema.`,
       inputSchema: callSchema,
-      async handler(args) {
+      async handler(args, context) {
         const { name, arguments: input = {} } = callSchema.parse(args);
         const tool = byName.get(name);
         if (!tool) return errorResult(`Unknown tool "${name}". Search for an available tool using ${searchName}.`);
@@ -91,7 +91,7 @@ export function createDiscoveredTools(
             `${issue.path.join('.') || 'arguments'}: ${issue.message}`,
           ).join('; '));
         }
-        return tool.handler(parsed.data);
+        return tool.handler(parsed.data, context);
       },
     },
   ];

@@ -3,8 +3,9 @@
  */
 
 import { z } from 'zod';
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, type AxiosRequestConfig } from 'axios';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { encodePathValue, formBody, readUpstreamResponse, uploadSchema } from './upstream-http';
 import TurndownService from 'turndown';
 import type { OpenApiSpec, OpenApiOperation, OpenApiParameter, OpenApiBodySchema } from './openapi-loader';
 
@@ -14,11 +15,16 @@ import { logger } from './logger';
 
 export const correlationIdStorage = new AsyncLocalStorage<string>();
 
+export interface ToolCallContext {
+  signal?: AbortSignal;
+  onEvent?: (event: string, count: number) => Promise<void>;
+}
+
 export interface ToolFromOpenApi {
   name: string;
   description: string;
   inputSchema: z.ZodObject<z.ZodRawShape>;
-  handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>;
+  handler: (args: Record<string, unknown>, context?: ToolCallContext) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>;
 }
 
 /**
@@ -175,14 +181,27 @@ function resolveBodySchema(
   return schema;
 }
 
-function bodyFieldToZod(schema: OpenApiBodySchema, spec: OpenApiSpec, depth = 0): z.ZodTypeAny {
+function isUploadField(schema: OpenApiBodySchema, spec: OpenApiSpec, depth = 0): boolean {
+  if (depth >= 8) return false;
+  const field = resolveBodySchema(schema, spec);
+  return !!field && (field.format === 'binary' ||
+    (field.type === 'string' && field.contentMediaType === 'application/octet-stream') ||
+    (!!field.items && isUploadField(field.items, spec, depth + 1)) ||
+    (field.anyOf ?? field.oneOf ?? []).some((item) => isUploadField(item, spec, depth + 1)));
+}
+
+function bodyFieldToZod(schema: OpenApiBodySchema, spec: OpenApiSpec, depth = 0, multipart = false): z.ZodTypeAny {
   const resolved = resolveBodySchema(schema, spec);
   if (!resolved || depth >= 8) return z.unknown();
   const alternatives = resolved.anyOf ?? resolved.oneOf;
   let field: z.ZodTypeAny;
   if (alternatives?.length) {
-    const [first, second, ...rest] = alternatives.map((item) => bodyFieldToZod(item, spec, depth + 1));
+    const [first, second, ...rest] = alternatives.map((item) => bodyFieldToZod(item, spec, depth + 1, multipart));
     field = second ? z.union([first, second, ...rest]) : first;
+  } else if (multipart && resolved.type === 'array' && resolved.items) {
+    field = z.array(bodyFieldToZod(resolved.items, spec, depth + 1, multipart));
+  } else if (multipart && isUploadField(resolved, spec)) {
+    field = uploadSchema;
   } else if (resolved.type === 'object' || resolved.properties) {
     field = z.object({}).passthrough();
   } else if (resolved.type === 'null') {
@@ -199,6 +218,7 @@ function buildZodShapeFromOperation(
   op: OpenApiOperation,
   spec: OpenApiSpecWithParams,
   bodySchema: OpenApiBodySchema | undefined,
+  multipart: boolean,
   convertHtmlToMarkdown?: boolean,
 ): z.ZodRawShape {
   const shape: z.ZodRawShape = {};
@@ -214,7 +234,7 @@ function buildZodShapeFromOperation(
   if (bodySchema?.properties) {
     for (const [propName, propSchema] of Object.entries(bodySchema.properties)) {
       if (shape[propName] === undefined) {
-        let field = bodyFieldToZod(propSchema, spec);
+        let field = bodyFieldToZod(propSchema, spec, 0, multipart);
         if (!requiredFields.includes(propName)) field = field.optional();
         const description = propSchema.description ?? resolveBodySchema(propSchema, spec)?.description;
         shape[propName] = description
@@ -277,7 +297,7 @@ function resolveOperations(
       if (!isIncluded(key, includeEndpoints, excludeEndpoints)) continue;
       const segment = pathToToolSegment(pathNorm);
       const name = toolPrefix ? `${toolPrefix.replace(/_$/, '')}_${segment}` : segment;
-      result.push({ key, method, path: pathNorm, op, name });
+      result.push({ key, method, path: '/' + pathKey.replace(/^\/+/, ''), op, name });
     }
   }
   return result;
@@ -355,11 +375,37 @@ export function openApiToTools(
       .filter((p): p is OpenApiParameter => p !== null);
     
     const queryParamNames = resolvedParams.filter((p) => p.in === 'query').map((p) => p.name);
-    const pathParamNames = resolvedParams.filter((p) => p.in === 'path').map((p) => p.name);
-    const bodySchema = resolveBodySchema(op.requestBody?.content?.['application/json']?.schema, spec);
+    const pathParams = new Map(resolvedParams.filter((p) => p.in === 'path').map((p) => [p.name.toLowerCase(), p]));
+    const reservedHeaders = /^(authorization|proxy-.*|host|connection|content-length|content-type|expect|keep-alive|te|trailer|transfer-encoding|upgrade|forwarded|x-forwarded-.*)$/i;
+    const headerParams = resolvedParams.filter((p) => p.in === 'header' && !reservedHeaders.test(p.name));
+    const content = op.requestBody?.content ?? {};
+    const mediaType = ['application/json', 'multipart/form-data', 'application/x-www-form-urlencoded']
+      .find((type) => content[type]) ?? Object.keys(content)[0];
+    const multipart = mediaType === 'multipart/form-data';
+    const urlEncoded = mediaType === 'application/x-www-form-urlencoded';
+    const bodySchema = resolveBodySchema(content[mediaType]?.schema, spec);
     const bodyParamNames = bodySchema?.properties ? Object.keys(bodySchema.properties) : [];
+    const fileFields = new Set(Object.entries(bodySchema?.properties ?? {})
+      .filter(([, field]) => multipart && isUploadField(field, spec)).map(([name]) => name));
 
-    const shape = buildZodShapeFromOperation(op, spec, bodySchema, config.convertHtmlToMarkdown);
+    const shape = buildZodShapeFromOperation(op, spec, bodySchema, multipart, config.convertHtmlToMarkdown);
+    let bodyArgument: string | undefined;
+    if (mediaType && !bodyParamNames.length) {
+      bodyArgument = 'body';
+      while (Object.prototype.hasOwnProperty.call(shape, bodyArgument)) bodyArgument = '_' + bodyArgument;
+      const schema = bodyFieldToZod(bodySchema ?? { type: 'string' }, spec, 0, multipart);
+      shape[bodyArgument] = op.requestBody?.required ? schema : schema.optional();
+    }
+    let headerArgument: string | undefined;
+    if (headerParams.length) {
+      headerArgument = 'headers';
+      while (Object.prototype.hasOwnProperty.call(shape, headerArgument)) headerArgument = '_' + headerArgument;
+      const headers = z.object(Object.fromEntries(headerParams.map((parameter) => [
+        parameter.name,
+        openApiTypeToZod(parameter.schema, parameter.description, parameter.required, config.convertHtmlToMarkdown),
+      ])));
+      shape[headerArgument] = headerParams.some((parameter) => parameter.required) ? headers : headers.optional();
+    }
     const inputSchema = z.object(shape);
 
     let description = [op.summary, op.description].filter(Boolean).join('. ') || `API ${method.toUpperCase()} ${path}`;
@@ -376,45 +422,60 @@ export function openApiToTools(
       });
     }
 
-    const handler = async (args: Record<string, unknown>) => {
+    const handler: ToolFromOpenApi['handler'] = async (args, context) => {
       const correlationId = correlationIdStorage.getStore() || 'unknown';
       const textContent = (text: string): { type: 'text'; text: string } => ({ type: 'text', text });
       try {
-        let url = path;
-        for (const p of pathParamNames) {
-          const val = args[p];
-          if (val !== undefined && val !== null) {
-            url = url.replace(new RegExp(`\\{${p}\\}`, 'gi'), String(val));
-          }
-        }
-        const params: Record<string, unknown> = {};
-        for (const p of queryParamNames) {
-          if (args[p] !== undefined && args[p] !== null) params[p] = args[p];
-        }
-        const data =
-          bodyParamNames.length > 0
+        const url = path.replace(/\{([^}]+)\}/g, (_match, name: string) => {
+          const parameter = pathParams.get(name.toLowerCase());
+          const value = args[parameter?.name ?? name];
+          if (value === undefined || value === null) throw new Error(`Missing path parameter: ${name}`);
+          const allowSlashes = parameter?.['x-allow-slash'] === true || parameter?.allowReserved === true ||
+            (name === 'endpoint' && !parameter?.schema?.enum);
+          return encodePathValue(value, allowSlashes);
+        });
+        const params = Object.fromEntries(queryParamNames.filter((p) => args[p] != null).map((p) => [p, args[p]]));
+        let data = bodyArgument
+          ? args[bodyArgument]
+          : bodyParamNames.length
             ? Object.fromEntries(bodyParamNames.filter((p) => args[p] !== undefined).map((p) => [p, args[p]]))
             : undefined;
+        if ((multipart || urlEncoded) && data && typeof data === 'object') {
+          data = formBody(data as Record<string, unknown>, multipart, fileFields);
+        }
+        const headerValues = (headerArgument ? args[headerArgument] : undefined) as Record<string, unknown> | undefined;
+        const headers = {
+          ...Object.fromEntries(headerParams.filter(({ name }) => headerValues?.[name] != null)
+            .map(({ name }) => [name, String(headerValues?.[name])])),
+          ...authHeaders,
+          ...(mediaType && !multipart && data !== undefined ? { 'Content-Type': mediaType } : {}),
+        };
 
-        logger.debug(correlationId, `Calling API: ${method.toUpperCase()} ${url}`, {
-          toolName: uniqueName,
-          params,
-          data,
-        });
-
-        const requestConfig = { method, url, params, data, headers: authHeaders };
+        logger.debug(correlationId, `Calling API: ${method.toUpperCase()} ${path}`, { toolName: uniqueName });
+        const requestConfig: AxiosRequestConfig = {
+          method, url, params, data, headers,
+          responseType: 'stream',
+          signal: context?.signal,
+          allowAbsoluteUrls: false,
+        };
         const res = await client.request(requestConfig);
+        const eventStream = String(res.headers['content-type'] ?? '').toLowerCase().includes('text/event-stream');
+        const response = await readUpstreamResponse(res.data, eventStream, context?.onEvent);
+        const text = safeStringify(response);
 
         logger.debug(correlationId, `API call successful: ${method.toUpperCase()} ${url}`, {
           toolName: uniqueName,
           status: res.status,
-          responseSize: safeStringify(res.data).length,
+          responseSize: text.length,
         });
 
-        return { content: [textContent(safeStringify(res.data))] };
+        return { content: [textContent(text)] };
       } catch (e) {
-        const message = axios.isAxiosError(e) && e.response?.data && typeof e.response.data === 'object' && 'error' in e.response.data
-          ? String((e.response.data as { error?: unknown }).error)
+        const response = axios.isAxiosError(e)
+          ? await readUpstreamResponse(e.response?.data, false).catch(() => undefined)
+          : undefined;
+        const message = response && typeof response === 'object' && 'error' in response
+          ? String(response.error)
           : (e instanceof Error ? e.message : String(e));
 
         const statusCode = axios.isAxiosError(e) && e.response ? e.response.status : undefined;
