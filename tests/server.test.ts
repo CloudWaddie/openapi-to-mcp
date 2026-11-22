@@ -47,7 +47,7 @@ describe('server', () => {
     expect(app).toBeDefined();
   });
 
-  describe('MCP endpoint authentication', () => {
+  describe('MCP over HTTP', () => {
     const servers: Server[] = [];
 
     async function listen(server: Server): Promise<string> {
@@ -79,6 +79,61 @@ describe('server', () => {
         }),
       });
     }
+
+    it('lists default tools and lets clients discover and call other allowed tools', async () => {
+      const handler = jest.fn(async ({ city }: Record<string, unknown>) => ({
+        content: [{ type: 'text' as const, text: `Forecast for ${city}` }],
+      }));
+      const hiddenTool: ToolFromOpenApi = {
+        name: 'weather_forecast',
+        description: 'Look up the weather for a city',
+        inputSchema: z.object({ city: z.string() }),
+        handler,
+      };
+      const app = createMcpApp({
+        ...baseConfig,
+        toolDiscovery: true,
+        defaultToolNames: [mockTool.name],
+        mcpAuth: { mode: 'bearer', token: 'discovery-token' },
+      }, [mockTool, hiddenTool]);
+      const url = (await listen(createServer(app))) + '/mcp';
+
+      async function request(method: string, params?: Record<string, unknown>) {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer discovery-token',
+            Accept: 'application/json, text/event-stream',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        });
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        const data = body.split('\n').find((line) => line.startsWith('data: '));
+        return JSON.parse(data ? data.slice(6) : body);
+      }
+
+      const list = await request('tools/list');
+      expect(list.result.tools.map(({ name }: { name: string }) => name)).toEqual(['test_tool', 'search_tools', 'call_tool']);
+      const search = await request('tools/call', { name: 'search_tools', arguments: { query: 'weather forecast' } });
+      expect(JSON.parse(search.result.content[0].text).tools).toEqual([
+        expect.objectContaining({
+          name: hiddenTool.name,
+          inputSchema: expect.objectContaining({ required: ['city'] }),
+        }),
+      ]);
+      const invalid = await request('tools/call', { name: 'call_tool', arguments: { name: hiddenTool.name } });
+      expect(invalid.result.isError).toBe(true);
+      const unknown = await request('tools/call', { name: 'call_tool', arguments: { name: 'unavailable' } });
+      expect(unknown.result.isError).toBe(true);
+      expect(handler).not.toHaveBeenCalled();
+      const valid = await request('tools/call', {
+        name: 'call_tool', arguments: { name: hiddenTool.name, arguments: { city: 'Adelaide' } },
+      });
+      expect(valid.result.content[0].text).toBe('Forecast for Adelaide');
+      expect(handler).toHaveBeenCalledWith({ city: 'Adelaide' });
+    });
 
     it('requires the configured static token and challenges unauthenticated requests', async () => {
       const app = createMcpApp({

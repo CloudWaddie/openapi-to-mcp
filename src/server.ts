@@ -1,5 +1,6 @@
 import path from 'path';
 import { randomUUID } from 'node:crypto';
+import { createDiscoveredTools } from './tool-discovery';
 import { configureMcpAuth } from './mcp-auth';
 import express, { type Express, type Request, type Response } from 'express';
 import cors from 'cors';
@@ -49,8 +50,9 @@ cleanupInterval.unref();
  * Tools are built from OpenAPI spec (loaded at startup). Maintains sessions for Streamable HTTP.
  * @param instructions Optional instructions for MCP clients (typically from OpenAPI info.description).
  */
-export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instructions?: string): Express {
+export function createMcpApp(config: McpConfig, catalog: ToolFromOpenApi[], instructions?: string): Express {
   const app = express();
+  const tools = config.toolDiscovery ? createDiscoveredTools(catalog, config.defaultToolNames ?? []) : catalog;
   const trustProxyHops = config.trustProxyHops ?? (config.mcpAuth?.mode === 'hosted-oauth' ? 1 : 0);
   if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops);
   

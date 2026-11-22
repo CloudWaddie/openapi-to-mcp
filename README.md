@@ -65,6 +65,21 @@ Environment variables are loaded from `.env` file in the project root (using `do
 
 **Backward compatibility**: `MCP_OPENAPI_SPEC_URL` and `MCP_OPENAPI_SPEC_FILE` are still supported but deprecated. `MCP_OPENAPI_SPEC` takes precedence if set.
 
+## Show a smaller default tool list
+
+Enable tool discovery to list only your chosen API tools plus `search_tools` and `call_tool` over `/mcp`.
+
+```dotenv
+MCP_TOOL_DISCOVERY=true
+MCP_DEFAULT_TOOLS=models_model_name_generatecontent
+```
+
+`MCP_DEFAULT_TOOLS` is a comma-separated list of exact generated tool names, including any configured prefix. An empty list shows only the discovery tools. Discovery is off by default.
+
+The client calls `search_tools` with keywords to get matching tools and their input schemas. It then calls `call_tool` with the exact result name and an `arguments` object. If a generated API tool already uses either discovery name, the discovery tool gets a numeric suffix.
+
+`MCP_INCLUDE_ENDPOINTS` and `MCP_EXCLUDE_ENDPOINTS` still control which operations are allowed. Only allowed tools can be listed, searched, or called.
+
 ## Protect the MCP endpoint
 
 Authentication for clients connecting to `/mcp` is opt-in. Choose one of these modes.

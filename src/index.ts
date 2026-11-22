@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   if (tools.length === 0) {
     logger.warn(correlationId, 'No tools registered. Check MCP_INCLUDE_ENDPOINTS / MCP_EXCLUDE_ENDPOINTS and OpenAPI paths.');
   } else {
-    logger.info(correlationId, `Registered ${tools.length} tool(s)`, {
+    logger.info(correlationId, `Generated ${tools.length} API tool(s)`, {
       toolNames: tools.map((t) => t.name),
     });
   }

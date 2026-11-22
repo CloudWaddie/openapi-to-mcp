@@ -40,6 +40,9 @@ export interface McpConfig {
   excludeEndpoints: string[];
   /** Prefix for tool names (e.g. telegram_ -> telegram_messages). */
   toolPrefix: string;
+  /** Enable search and invocation for tools omitted from the default tool list. */
+  toolDiscovery?: boolean;
+  defaultToolNames?: string[];
   /** Path to custom instructions file. */
   instructionsFile: string | null;
   /** Instructions combination mode: default, replace, append, prepend. */
@@ -94,6 +97,8 @@ export function loadConfig(): McpConfig {
     includeEndpoints,
     excludeEndpoints,
     toolPrefix,
+    toolDiscovery: process.env.MCP_TOOL_DISCOVERY?.trim().toLowerCase() === 'true',
+    defaultToolNames: (process.env.MCP_DEFAULT_TOOLS ?? '').split(',').map((name) => name.trim()).filter(Boolean),
     instructionsFile,
     instructionsMode,
     convertHtmlToMarkdown,
