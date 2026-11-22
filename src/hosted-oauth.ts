@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import { openHostedOAuthStore } from './hosted-oauth-store';
 import express, { type Express, type RequestHandler } from 'express';
 import type { AuthorizationParams, OAuthServerProvider } from '../node_modules/@modelcontextprotocol/sdk/dist/cjs/server/auth/provider';
 import type { OAuthRegisteredClientsStore } from '../node_modules/@modelcontextprotocol/sdk/dist/cjs/server/auth/clients';
@@ -18,12 +19,6 @@ const refreshLifetime = 90 * 24 * 60 * 60;
 const attemptWindow = 15 * 60_000;
 const maxFailedAttempts = 10;
 
-type Grant = {
-  clientId: string;
-  scopes: string[];
-  authorizationId: string;
-  expiresAt: number;
-};
 type PendingAuthorization = { clientId: string; params: AuthorizationParams; expiresAt: number };
 
 function secret(): string {
@@ -49,18 +44,16 @@ function removeExpired(records: Map<string, { expiresAt: number }>): void {
 
 export function configureHostedOAuth(
   app: Express,
-  config: { publicUrl: string; password: string },
+  config: { publicUrl: string; password: string; storeFile?: string },
   readBearerToken: (authorization?: string) => string | undefined,
 ): RequestHandler {
   const issuer = new URL(config.publicUrl);
   const resource = new URL('/mcp', issuer);
   const metadataUrl = getOAuthProtectedResourceMetadataUrl(resource);
   const passwordHash = digest(config.password);
-  const clients = new Map<string, OAuthClientInformationFull>();
+  const store = openHostedOAuthStore(config.storeFile ?? './.mcp-data/oauth-state.json', resource.href);
   const approvals = new Map<string, PendingAuthorization>();
   const codes = new Map<string, PendingAuthorization>();
-  const access = new Map<string, Grant>();
-  const refresh = new Map<string, Grant>();
   let failedAttempts = 0;
   let resetAttemptsAt = 0;
 
@@ -78,14 +71,17 @@ export function configureHostedOAuth(
     return grant;
   }
 
-  function issueTokens(clientId: string, scopes: string[], authorizationId: string) {
+  function issueTokens(clientId: string, scopes: string[], authorizationId: string, consumedRefresh?: string) {
     const accessToken = secret();
     const refreshToken = secret();
     const grant = { clientId, scopes, authorizationId };
-    removeExpired(access);
-    removeExpired(refresh);
-    access.set(accessToken, { ...grant, expiresAt: Date.now() + accessLifetime * 1000 });
-    refresh.set(refreshToken, { ...grant, expiresAt: Date.now() + refreshLifetime * 1000 });
+    store.update(({ access, refresh }) => {
+      removeExpired(access);
+      removeExpired(refresh);
+      if (consumedRefresh) refresh.delete(consumedRefresh);
+      access.set(digest(accessToken).toString('hex'), { ...grant, expiresAt: Date.now() + accessLifetime * 1000 });
+      refresh.set(digest(refreshToken).toString('hex'), { ...grant, expiresAt: Date.now() + refreshLifetime * 1000 });
+    });
     return {
       access_token: accessToken,
       token_type: 'Bearer',
@@ -96,12 +92,12 @@ export function configureHostedOAuth(
   }
 
   const clientsStore: OAuthRegisteredClientsStore = {
-    getClient: (id) => clients.get(id),
+    getClient: (id) => store.state.clients.get(id),
     registerClient: (client) => {
       if (!client.redirect_uris.length || !client.redirect_uris.every(allowsRedirect)) {
         throw new InvalidClientMetadataError('Redirect URIs must use HTTPS or loopback HTTP and omit fragments and credentials');
       }
-      if (clients.size >= 10_000) throw new InvalidClientMetadataError('Client registration limit reached');
+      if (store.state.clients.size >= 10_000) throw new InvalidClientMetadataError('Client registration limit reached');
       const registered: OAuthClientInformationFull = {
         client_id: secret(),
         client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -111,7 +107,7 @@ export function configureHostedOAuth(
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
       };
-      clients.set(registered.client_id, registered);
+      store.update(({ clients }) => clients.set(registered.client_id, registered));
       return registered;
     },
   };
@@ -154,24 +150,32 @@ export function configureHostedOAuth(
       if (digest(verifier).toString('base64url') !== params.codeChallenge) {
         throw new InvalidGrantError('PKCE verifier does not match');
       }
+      const tokens = issueTokens(client.client_id, params.scopes ?? [], secret());
       codes.delete(code);
-      return issueTokens(client.client_id, params.scopes ?? [], secret());
+      return tokens;
     },
     async exchangeRefreshToken(client, token, scopes, target) {
       checkResource(target);
-      const grant = getGrant(refresh, token, client.client_id);
+      const key = digest(token).toString('hex');
+      const grant = getGrant(store.state.refresh, key, client.client_id);
       if (scopes?.some((scope) => !grant.scopes.includes(scope))) throw new InvalidScopeError('Scope was not authorized');
-      refresh.delete(token);
-      return issueTokens(client.client_id, scopes ?? grant.scopes, grant.authorizationId);
+      return issueTokens(client.client_id, scopes ?? grant.scopes, grant.authorizationId, key);
     },
     async verifyAccessToken(token) {
-      const grant = access.get(token);
+      const grant = store.state.access.get(digest(token).toString('hex'));
       if (!grant || grant.expiresAt <= Date.now()) throw new InvalidTokenError('Invalid or expired token');
       return { token, clientId: grant.clientId, scopes: grant.scopes, expiresAt: grant.expiresAt / 1000, resource };
     },
     async revokeToken(client, request) {
-      if (access.get(request.token)?.clientId === client.client_id) access.delete(request.token);
-      if (refresh.get(request.token)?.clientId === client.client_id) refresh.delete(request.token);
+      const key = digest(request.token).toString('hex');
+      const ownsAccess = store.state.access.get(key)?.clientId === client.client_id;
+      const ownsRefresh = store.state.refresh.get(key)?.clientId === client.client_id;
+      if (ownsAccess || ownsRefresh) {
+        store.update(({ access, refresh }) => {
+          if (ownsAccess) access.delete(key);
+          if (ownsRefresh) refresh.delete(key);
+        });
+      }
     },
   };
 
@@ -218,7 +222,7 @@ export function configureHostedOAuth(
   return (req, res, next) => {
     const header = req.get('authorization');
     const token = readBearerToken(header);
-    const grant = token ? access.get(token) : undefined;
+    const grant = token ? store.state.access.get(digest(token).toString('hex')) : undefined;
     if (!grant || grant.expiresAt <= Date.now()) {
       const error = header ? ', error="invalid_token"' : '';
       res.set('WWW-Authenticate', `Bearer resource_metadata="${metadataUrl}"${error}`);

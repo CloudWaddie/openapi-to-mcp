@@ -33,3 +33,6 @@ Thumbs.db
 Dockerfile
 .dockerignore
 docker-compose.yaml
+
+# Hosted OAuth state
+.mcp-data/

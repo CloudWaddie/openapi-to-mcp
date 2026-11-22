@@ -9,4 +9,6 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build && npm prune --production
 
+ENV MCP_OAUTH_STATE_FILE=/data/oauth-state.json
+
 CMD ["node", "dist/index.js"]

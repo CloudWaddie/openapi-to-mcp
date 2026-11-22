@@ -8,7 +8,7 @@ const scopePattern = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
 
 export type McpAuthConfig =
   | { mode: 'bearer'; token: string }
-  | { mode: 'hosted-oauth'; password: string; publicUrl: string }
+  | { mode: 'hosted-oauth'; password: string; publicUrl: string; storeFile?: string }
   | {
       mode: 'oauth';
       resource: string;
@@ -54,7 +54,7 @@ export function loadMcpAuthConfig(): McpAuthConfig | undefined {
     if (token || externalOAuth) throw new Error('Configure only one MCP server authentication mode');
     const url = new URL(readOAuthUrl('MCP_PUBLIC_URL'));
     if (url.pathname !== '/') throw new Error('MCP_PUBLIC_URL must be the public origin without /mcp');
-    return { mode: 'hosted-oauth', password, publicUrl: url.origin };
+    return { mode: 'hosted-oauth', password, publicUrl: url.origin, storeFile: process.env.MCP_OAUTH_STATE_FILE?.trim() || undefined };
   }
   if (process.env.MCP_PUBLIC_URL?.trim() && !externalOAuth && !token) {
     throw new Error('MCP_OAUTH_PASSWORD is required for hosted MCP OAuth');

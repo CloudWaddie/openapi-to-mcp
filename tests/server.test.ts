@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createMcpApp } from '../src/server';
@@ -49,6 +52,7 @@ describe('server', () => {
 
   describe('MCP over HTTP', () => {
     const servers: Server[] = [];
+    const temporaryDirectories: string[] = [];
 
     async function listen(server: Server): Promise<string> {
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -61,6 +65,7 @@ describe('server', () => {
         server.close((error) => error ? reject(error) : resolve());
         server.closeAllConnections();
       })));
+      for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
     });
 
     function initialize(url: string, authorization?: string): Promise<Response> {
@@ -153,13 +158,17 @@ describe('server', () => {
       expect(await accepted.text()).toContain('"protocolVersion":"2025-11-25"');
     });
 
-    it('runs the hosted OAuth flow with password approval and PKCE', async () => {
+    it('runs hosted OAuth and preserves clients and token rotation across restarts', async () => {
       const server = createServer();
       const origin = await listen(server);
-      const app = createMcpApp({
+      const directory = mkdtempSync(join(tmpdir(), 'mcp-oauth-test-'));
+      temporaryDirectories.push(directory);
+      const storeFile = join(directory, 'oauth-state.json');
+      const config: McpConfig = {
         ...baseConfig,
-        mcpAuth: { mode: 'hosted-oauth', password: 'owner-test-password', publicUrl: origin },
-      }, [mockTool]);
+        mcpAuth: { mode: 'hosted-oauth', password: 'owner-test-password', publicUrl: origin, storeFile },
+      };
+      const app = createMcpApp(config, [mockTool]);
       expect(app.get('trust proxy')).toBe(1);
       server.on('request', app);
       const resource = origin + '/mcp';
@@ -216,11 +225,23 @@ describe('server', () => {
       expect((await initialize(resource, `Bearer ${tokens.access_token}`)).status).toBe(200);
       expect((await post('/token', { ...exchange, code_verifier: verifier })).status).toBe(400);
 
+      const persisted = readFileSync(storeFile, 'utf8');
+      expect(persisted).toContain(client.client_id);
+      expect(persisted).not.toContain(tokens.access_token);
+      expect(persisted).not.toContain(tokens.refresh_token);
+      server.removeAllListeners('request');
+      server.on('request', createMcpApp(config, [mockTool]));
+      expect((await initialize(resource, `Bearer ${tokens.access_token}`)).status).toBe(200);
+
       const refresh = { grant_type: 'refresh_token', client_id: client.client_id, refresh_token: tokens.refresh_token, resource };
       const refreshed = await post('/token', refresh);
       expect(refreshed.status).toBe(200);
-      expect((await refreshed.json() as { refresh_token: string }).refresh_token).not.toBe(tokens.refresh_token);
+      const rotated = await refreshed.json() as { refresh_token: string };
+      expect(rotated.refresh_token).not.toBe(tokens.refresh_token);
+      server.removeAllListeners('request');
+      server.on('request', createMcpApp(config, [mockTool]));
       expect((await post('/token', refresh)).status).toBe(400);
+      expect((await post('/token', { ...refresh, refresh_token: rotated.refresh_token })).status).toBe(200);
     });
 
     it('advertises OAuth discovery and checks introspected audience, expiry and scope', async () => {

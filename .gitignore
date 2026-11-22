@@ -32,3 +32,6 @@ Thumbs.db
 
 # Cursor (project-specific)
 .cursor/
+
+# Hosted OAuth state
+.mcp-data/

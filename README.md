@@ -85,8 +85,10 @@ The client calls `search_tools` with keywords to get matching tools and their in
 Authentication for clients connecting to `/mcp` is opt-in. Choose one of these modes.
 
 - **Static Bearer token.** Set `MCP_SERVER_BEARER_TOKEN` to a high-entropy secret and configure clients to send `Authorization: Bearer <token>` on every MCP request.
-- **Hosted OAuth.** Set `MCP_PUBLIC_URL=https://mcp.example.com` to your public origin and `MCP_OAUTH_PASSWORD` to a strong private password. Configure your MCP client with `https://mcp.example.com/mcp`. The client opens the server’s authorization page in your browser, where you enter the password to approve access. Hosted OAuth supports dynamic public client registration, PKCE S256, and rotating refresh tokens. Client registrations and tokens are stored in memory, so clients must reconnect after a restart or redeploy.
+- **Hosted OAuth.** Set `MCP_PUBLIC_URL=https://mcp.example.com` to your public origin and `MCP_OAUTH_PASSWORD` to a strong private password. Configure your MCP client with `https://mcp.example.com/mcp`. The client opens the server’s authorization page in your browser, where you enter the password to approve access. Hosted OAuth supports dynamic public client registration, PKCE S256, and rotating refresh tokens. Client registrations and unexpired tokens survive restarts when the OAuth state file is on persistent storage.
 - **External OAuth.** Use an external authorization server that publishes OAuth or OpenID Connect discovery metadata and supports RFC 7662 token introspection with HTTP Basic client authentication.
+
+For **Coolify**, add a persistent volume with destination `/data` and keep the same volume across redeploys. Set `MCP_OAUTH_STATE_FILE=/data/oauth-state.json` or use the default from the Dockerfile. Use a single replica with its own volume and stop the old container before starting the replacement. Docker Compose includes a named volume. Outside Docker, the default file is `./.mcp-data/oauth-state.json`. Clients registered before persistent storage was added need to reconnect once.
 
 | OAuth variable | Purpose |
 |----------|-------------|
