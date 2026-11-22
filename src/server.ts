@@ -1,4 +1,6 @@
 import path from 'path';
+import { randomUUID } from 'node:crypto';
+import { configureMcpAuth } from './mcp-auth';
 import express, { type Express, type Request, type Response } from 'express';
 import cors from 'cors';
 import type { McpConfig } from './config';
@@ -32,7 +34,7 @@ const cleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [sessionId, session] of sessions.entries()) {
     if (now - session.lastAccess > SESSION_TIMEOUT) {
-      logger.debug('cleanup', `Cleaning up expired session: ${sessionId}`);
+      logger.debug('cleanup', 'Cleaning up expired session');
       session.transport.close().catch(() => {});
       session.server.close().catch(() => {});
       sessions.delete(sessionId);
@@ -55,13 +57,17 @@ export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instru
     cors({
       origin: true,
       credentials: true,
-      methods: ['GET', 'POST', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Mcp-Session-Id', 'X-Correlation-ID'],
-      exposedHeaders: ['Mcp-Session-Id'],
+      methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Authorization', 'Content-Type', 'Mcp-Session-Id', 'Mcp-Protocol-Version', 'Last-Event-ID', 'X-Correlation-ID'],
+      exposedHeaders: ['Mcp-Session-Id', 'WWW-Authenticate'],
     }),
   );
   
+  if (config.mcpAuth) {
+    app.all('/mcp', configureMcpAuth(app, config.mcpAuth));
+  }
   app.use(express.json());
+  const appId = randomUUID();
 
   logger.info('system', `Creating MCP app with ${tools.length} tool(s)`, {
     serverName: config.serverName,
@@ -121,16 +127,16 @@ export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instru
     
     logger.debug(correlationId, `Received ${req.method} request to ${req.path}`, {
       sessionId: sessionIdHeader,
-      headers: req.headers,
       body: req.body,
     });
 
     // SDK handles sessions internally, but we need to maintain server/transport instances per session
     let sessionData: SessionData | null = null;
-    let actualSessionId: string | null = sessionIdHeader;
+    const sessionKey = (id: string) => JSON.stringify([appId, res.locals.mcpAuthIdentity, id]);
+    let currentSessionKey = sessionKey(sessionIdHeader || randomUUID());
     
-    if (sessionIdHeader && sessions.has(sessionIdHeader)) {
-      sessionData = sessions.get(sessionIdHeader)!;
+    if (sessionIdHeader && sessions.has(currentSessionKey)) {
+      sessionData = sessions.get(currentSessionKey)!;
       sessionData.lastAccess = Date.now();
       logger.debug(correlationId, `Reusing existing session: ${sessionIdHeader}`);
     } else {
@@ -138,14 +144,13 @@ export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instru
       await server.connect(transport);
       
       // Create temporary session entry - SDK will set actual session ID in response header
-      const tempSessionId = sessionIdHeader || `temp-${Date.now()}-${Math.random().toString(36).substring(7)}`;
       sessionData = {
         server,
         transport,
         lastAccess: Date.now(),
       };
-      sessions.set(tempSessionId, sessionData);
-      logger.debug(correlationId, `Created new session placeholder: ${tempSessionId}`);
+      sessions.set(currentSessionKey, sessionData);
+      logger.debug(correlationId, 'Created new session placeholder');
     }
 
     const { server, transport } = sessionData;
@@ -154,14 +159,12 @@ export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instru
     const originalSetHeader = res.setHeader.bind(res);
     res.setHeader = function (name: string, value: string | number | string[]): typeof res {
       if (name.toLowerCase() === 'mcp-session-id' && typeof value === 'string') {
-        const newSessionId = value;
-        if (actualSessionId !== newSessionId && sessions.has(actualSessionId || '')) {
-          // Move session data to actual session ID
-          const data = sessions.get(actualSessionId || '')!;
-          sessions.delete(actualSessionId || '');
-          sessions.set(newSessionId, data);
-          actualSessionId = newSessionId;
-          logger.debug(correlationId, `Session ID updated: ${newSessionId}`);
+        const newSessionKey = sessionKey(value);
+        if (currentSessionKey !== newSessionKey && sessions.has(currentSessionKey)) {
+          const data = sessions.get(currentSessionKey)!;
+          sessions.delete(currentSessionKey);
+          sessions.set(newSessionKey, data);
+          currentSessionKey = newSessionKey;
         }
       }
       return originalSetHeader(name, value);

@@ -64,6 +64,26 @@ Environment variables are loaded from `.env` file in the project root (using `do
 
 **Backward compatibility**: `MCP_OPENAPI_SPEC_URL` and `MCP_OPENAPI_SPEC_FILE` are still supported but deprecated. `MCP_OPENAPI_SPEC` takes precedence if set.
 
+## Protect the MCP endpoint
+
+Authentication for clients connecting to `/mcp` is opt-in. Choose one of these modes.
+
+- **Static Bearer token.** Set `MCP_SERVER_BEARER_TOKEN` to a high-entropy secret and configure clients to send `Authorization: Bearer <token>` on every MCP request.
+- **OAuth 2.0.** Use an external authorization server that publishes OAuth or OpenID Connect discovery metadata and supports RFC 7662 token introspection with HTTP Basic client authentication.
+
+| OAuth variable | Purpose |
+|----------|-------------|
+| `MCP_OAUTH_RESOURCE_URL` | Public URL clients use to connect to MCP, for example `https://mcp.example.com/mcp`. The authorization server must issue access tokens with this exact audience. |
+| `MCP_OAUTH_ISSUER` | Authorization server issuer URL advertised to clients. |
+| `MCP_OAUTH_INTROSPECTION_URL` | Trusted token introspection endpoint. Its response must include `active: true` and an `aud` string or array containing the resource URL. |
+| `MCP_OAUTH_CLIENT_ID` | Client ID for the MCP server's introspection requests. |
+| `MCP_OAUTH_CLIENT_SECRET` | Client secret for the MCP server's introspection requests. |
+| `MCP_OAUTH_REQUIRED_SCOPES` | Optional space-separated scopes. An access token must include every configured scope. |
+
+An OAuth client can discover the authorization server through the `WWW-Authenticate` challenge and the public protected-resource metadata endpoint at `/.well-known/oauth-protected-resource/mcp` for the example above. If a reverse proxy changes the public MCP path, route the corresponding public metadata path to this app as well. Use HTTPS for public MCP connections. OAuth configuration accepts HTTP URLs on loopback for local development.
+
+`MCP_API_BEARER_TOKEN` and `MCP_API_BASIC_AUTH` configure credentials for upstream API requests.
+
 ## Run with npm (local)
 
 1. Copy `.env.example` to `.env` and set at least the OpenAPI spec source and API base URL:

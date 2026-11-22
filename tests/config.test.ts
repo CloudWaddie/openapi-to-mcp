@@ -182,4 +182,21 @@ describe('config', () => {
     expect(config.apiBasicAuth).toBeNull();
     expect(config.apiBearerToken).toBeNull();
   });
+
+  it('loads server and upstream Bearer tokens independently', () => {
+    process.env.MCP_SERVER_BEARER_TOKEN = 'server-token';
+    process.env.MCP_API_BEARER_TOKEN = 'upstream-token';
+
+    const config = loadConfig();
+    expect(config.mcpAuth).toEqual({ mode: 'bearer', token: 'server-token' });
+    expect(config.apiBearerToken).toBe('upstream-token');
+  });
+
+  it('rejects incomplete or conflicting OAuth configuration', () => {
+    process.env.MCP_OAUTH_RESOURCE_URL = 'https://mcp.example.com/mcp';
+    expect(() => loadConfig()).toThrow('MCP_OAUTH_ISSUER is required');
+
+    process.env.MCP_SERVER_BEARER_TOKEN = 'server-token';
+    expect(() => loadConfig()).toThrow('Configure either MCP server Bearer authentication or OAuth');
+  });
 });

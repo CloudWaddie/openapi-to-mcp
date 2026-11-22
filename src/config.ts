@@ -2,6 +2,7 @@
  * MCP server config from environment. All MCP-related vars use MCP_ prefix.
  */
 
+import { loadMcpAuthConfig, type McpAuthConfig } from './mcp-auth';
 import { parseInstructionsMode, InstructionsMode } from './instructions-loader';
 
 function envInt(name: string, defaultValue: number): number {
@@ -47,6 +48,8 @@ export interface McpConfig {
   apiBasicAuth: string | null;
   /** Bearer token for API requests. Takes precedence over apiBasicAuth when both set. */
   apiBearerToken: string | null;
+  /** Authentication for clients connecting to /mcp. */
+  mcpAuth?: McpAuthConfig;
 }
 
 const DEFAULT_SERVER_NAME = 'openapi-to-mcp';
@@ -88,5 +91,6 @@ export function loadConfig(): McpConfig {
     convertHtmlToMarkdown,
     apiBasicAuth,
     apiBearerToken,
+    mcpAuth: loadMcpAuthConfig(),
   };
 }
