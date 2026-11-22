@@ -53,7 +53,7 @@ Environment variables are loaded from `.env` file in the project root (using `do
 | `MCP_EXCLUDE_ENDPOINTS` | Comma-separated `method:path` to exclude. Ignored for endpoints in include. | - |
 | `MCP_TOOL_PREFIX` | Prefix for tool names (e.g. `api_` -> `api_messages`, `api_channels`) | (empty) |
 | `MCP_SERVER_NAME` | Server name reported to MCP clients | `openapi-to-mcp` |
-| `MCP_TRUST_PROXY_HOPS` | Number of trusted reverse proxy hops. Set to `1` when Coolify is the only proxy and clients can reach the app only through it. | `0` |
+| `MCP_TRUST_PROXY_HOPS` | Number of trusted reverse proxy hops. Coolify with one reverse proxy uses `1`. Set to `0` when clients can reach the app directly. | `1` for hosted OAuth, `0` otherwise |
 | `MCP_PORT` | Port for Streamable HTTP server | `3100` |
 | `MCP_HOST` | Bind host | `0.0.0.0` |
 | `MCP_LOG_LEVEL` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR` (case-insensitive) | `INFO` |

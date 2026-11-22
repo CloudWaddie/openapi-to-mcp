@@ -214,6 +214,10 @@ describe('config', () => {
   });
 
   it('validates the trusted proxy hop count', () => {
+    delete process.env.MCP_TRUST_PROXY_HOPS;
+    expect(loadConfig().trustProxyHops).toBeUndefined();
+    process.env.MCP_TRUST_PROXY_HOPS = '0';
+    expect(loadConfig().trustProxyHops).toBe(0);
     process.env.MCP_TRUST_PROXY_HOPS = '1';
     expect(loadConfig().trustProxyHops).toBe(1);
     process.env.MCP_TRUST_PROXY_HOPS = 'true';

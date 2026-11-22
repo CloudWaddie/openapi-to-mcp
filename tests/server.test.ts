@@ -101,11 +101,12 @@ describe('server', () => {
     it('runs the hosted OAuth flow with password approval and PKCE', async () => {
       const server = createServer();
       const origin = await listen(server);
-      server.on('request', createMcpApp({
+      const app = createMcpApp({
         ...baseConfig,
-        trustProxyHops: 1,
         mcpAuth: { mode: 'hosted-oauth', password: 'owner-test-password', publicUrl: origin },
-      }, [mockTool]));
+      }, [mockTool]);
+      expect(app.get('trust proxy')).toBe(1);
+      server.on('request', app);
       const resource = origin + '/mcp';
       const post = (path: string, params: Record<string, string>, requestOrigin = origin) => fetch(origin + path, {
         method: 'POST', body: new URLSearchParams(params), redirect: 'manual',
@@ -122,7 +123,7 @@ describe('server', () => {
 
       const redirect = 'http://localhost:5099/callback';
       const registration = await fetch(metadata.registration_endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '192.0.2.10' },
         body: JSON.stringify({ redirect_uris: [redirect], token_endpoint_auth_method: 'none' }),
       });
       expect(registration.status).toBe(201);

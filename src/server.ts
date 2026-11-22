@@ -51,7 +51,8 @@ cleanupInterval.unref();
  */
 export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instructions?: string): Express {
   const app = express();
-  if (config.trustProxyHops) app.set('trust proxy', config.trustProxyHops);
+  const trustProxyHops = config.trustProxyHops ?? (config.mcpAuth?.mode === 'hosted-oauth' ? 1 : 0);
+  if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops);
   
   // Enable CORS for browser-based MCP clients (e.g., MCP Inspector)
   app.use(
@@ -72,6 +73,7 @@ export function createMcpApp(config: McpConfig, tools: ToolFromOpenApi[], instru
 
   logger.info('system', `Creating MCP app with ${tools.length} tool(s)`, {
     serverName: config.serverName,
+    trustProxyHops,
     toolNames: tools.map((t) => t.name),
   });
 
